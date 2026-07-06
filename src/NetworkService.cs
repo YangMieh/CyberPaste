@@ -997,11 +997,15 @@ namespace CyberPaste
 			public bool Failed;
 
 			public string Error;
+
+			public bool Reconnecting;
 		}
 
 		// ── v1.3.6 大宗循序接收(接收端,我方自己寫檔,跳過 Explorer 複製引擎)──
 		// 直接寫進 destFolder;斷線用 v1.3.3 位元組續傳(記已寫入量)+ v1.3.4 路徑失效切換(換候選 IP)。
-		public void ReceiveBulk(IPAddress[] sources, Guid session, List<FileMeta> metas, string destFolder, bool skipExisting, Action<BulkProgress> onProgress)
+		// onActiveWrite:true=正在實際寫檔(呼叫端據此暫停磁碟監看防洗爆);false=沒在寫(斷線重連等待/完成/放棄→
+		// 呼叫端恢復監看,這樣「取消/斷線後」使用者能立刻貼下一個,不必等重連迴圈跑完(v1.4.3 修)。
+		public void ReceiveBulk(IPAddress[] sources, Guid session, List<FileMeta> metas, string destFolder, bool skipExisting, Action<bool> onActiveWrite, Action<BulkProgress> onProgress)
 		{
 			IPAddress[] src = ((sources != null && sources.Length > 0) ? sources : new IPAddress[1] { IPAddress.Loopback });
 			long total = 0L;
@@ -1019,7 +1023,27 @@ namespace CyberPaste
 			long lastBytes = 0L;
 			double lastSec = 0.0;
 			double mbps = 0.0;
+			bool active = false;
+			Action<bool> setActive = delegate(bool a)
+			{
+				if (a != active)
+				{
+					active = a;
+					if (onActiveWrite != null)
+					{
+						try
+						{
+							onActiveWrite(a);
+						}
+						catch
+						{
+						}
+					}
+				}
+			};
 			Logger.Log("[NET] 大宗接收開始 → " + destFolder + " 共 " + metas.Count + " 檔 / " + total + " bytes");
+			try
+			{
 			while (true)
 			{
 				TcpClient client = null;
@@ -1039,6 +1063,7 @@ namespace CyberPaste
 					{
 						Logger.Log("[NET] 大宗切換路徑 → " + src[srcIdx] + " 從 #" + resumeIndex + " offset " + resumeOffset);
 					}
+					setActive(true); // 開始實際寫檔→暫停磁碟監看
 					byte[] buf = new byte[1048576];
 					while (true)
 					{
@@ -1046,6 +1071,7 @@ namespace CyberPaste
 						if (index < 0)
 						{
 							sw.Stop();
+							setActive(false);
 							onProgress(new BulkProgress
 							{
 								BytesDone = bytesDone,
@@ -1170,6 +1196,7 @@ namespace CyberPaste
 				}
 				catch (Exception ex)
 				{
+					setActive(false); // 停止寫檔→立刻恢復磁碟監看(取消/斷線後使用者能馬上貼下一個)
 					try
 					{
 						if (client != null)
@@ -1206,6 +1233,17 @@ namespace CyberPaste
 						return;
 					}
 					srcIdx = (srcIdx + 1) % src.Length;
+					onProgress(new BulkProgress
+					{
+						BytesDone = bytesDone,
+						BytesTotal = total,
+						FilesDone = filesDone,
+						FilesTotal = metas.Count,
+						Mbps = 0.0,
+						CurrentName = "",
+						Done = false,
+						Reconnecting = true
+					});
 					try
 					{
 						Thread.Sleep(500);
@@ -1214,6 +1252,11 @@ namespace CyberPaste
 					{
 					}
 				}
+			}
+			}
+			finally
+			{
+				setActive(false);
 			}
 		}
 

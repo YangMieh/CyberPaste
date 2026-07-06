@@ -54,6 +54,7 @@ namespace CyberPaste
         public void UpdateProgress(NetworkService.BulkProgress p)
         {
             if (p.Failed) { MarkFailed(p.Error); return; }
+            if (p.Reconnecting) { _title.Text = "連線中斷，重連中…"; return; }
 
             if (p.BytesTotal > 0)
             {

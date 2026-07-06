@@ -312,35 +312,47 @@ namespace CyberPaste
 				handedOff = true;
 				ThreadPool.QueueUserWorkItem(delegate
 				{
-					// 大宗要往這顆碟寫上千個檔→先暫停磁碟監看,免得自己的寫入把 watcher 緩衝洗爆(v1.4.2 修「第二次貼不上」)
 					try
 					{
-						if (_driveWatcher != null)
-						{
-							_driveWatcher.Suspend();
-						}
-					}
-					catch
-					{
-					}
-					try
-					{
-						_net.ReceiveBulk(srcIps, sessionCopy, metas, destCopy, skipCopy, delegate(NetworkService.BulkProgress p)
-						{
-							if (formRef != null)
+						// onActiveWrite:只在「實際寫檔」時暫停磁碟監看(免得自己寫入洗爆 watcher);
+						// 一旦斷線/取消進入重連等待就恢復監看→使用者能立刻貼下一個,不必等重連迴圈跑完(v1.4.3)
+						_net.ReceiveBulk(srcIps, sessionCopy, metas, destCopy, skipCopy,
+							delegate(bool activeWrite)
 							{
 								try
 								{
-									formRef.BeginInvoke((Action)delegate
+									if (_driveWatcher != null)
 									{
-										formRef.UpdateProgress(p);
-									});
+										if (activeWrite)
+										{
+											_driveWatcher.Suspend();
+										}
+										else
+										{
+											_driveWatcher.Resume();
+										}
+									}
 								}
 								catch
 								{
 								}
-							}
-						});
+							},
+							delegate(NetworkService.BulkProgress p)
+							{
+								if (formRef != null)
+								{
+									try
+									{
+										formRef.BeginInvoke((Action)delegate
+										{
+											formRef.UpdateProgress(p);
+										});
+									}
+									catch
+									{
+									}
+								}
+							});
 					}
 					catch (Exception ex)
 					{
@@ -361,7 +373,7 @@ namespace CyberPaste
 					}
 					finally
 					{
-						// 寫完重建乾淨的監看,下一次貼上就偵測得到
+						// 保底:確保監看已恢復(正常情況 ReceiveBulk 的 onActiveWrite(false) 已恢復,這裡再保險一次)
 						try
 						{
 							if (_driveWatcher != null)
