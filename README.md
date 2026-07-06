@@ -62,10 +62,28 @@ UDP 45888 for discovery, TCP 45889 for transfer. Designed for a trusted LAN; tra
 
 UDP 45888 用於探索，TCP 45889 用於傳輸。為可信任的內網設計，流量不加密。
 
-## Author / 作者
+## Changelog / 更新日誌
 
-Made by [XiaoMie / 小咩](https://github.com/YangMieh).
+- **v1.3.0** — Baseline. Two-way text / image / file sync across machines using OLE delayed-rendering virtual files, plus file logging.
+- **v1.3.1** — Self-healing discovery: per-subnet directed beacons let peers rediscover each other automatically, fixing the "can't transfer a second time" bug. Added crash / freeze logging and a heartbeat.
+- **v1.3.2** — Connection pooling: reuses ~8–10 long-lived connections instead of one TCP connection per file, plus Wi-Fi unicast keep-alive.
+- **v1.3.3** — Byte-level transparent resume: a dropped link resumes from the exact offset and only re-sends the remaining bytes, invisible to Explorer.
+- **v1.3.4** — Automatic best-path selection (wired > Wi-Fi > virtual > VPN, avoids Hamachi) and automatic failover to the next-best path mid-transfer.
+- **v1.3.5** — Renamed to CyberPaste; system-tray menu polish. (current release)
 
 <!-- -->
 
-由 [小咩 / XiaoMie](https://github.com/YangMieh) 製作。
+- **v1.3.0** — 基準版。以 OLE 延遲渲染虛擬檔達成跨機的文字／圖片／檔案雙向同步，並加入檔案日誌。
+- **v1.3.1** — 探索自我修復：對各網卡子網發定向 beacon，讓夥伴自動重新發現彼此，修好「傳完一次後第二次傳不動」的問題。加入崩潰／凍結記錄與心跳。
+- **v1.3.2** — 連線池：以約 8～10 條長連線反覆重用，取代「一個檔一條 TCP 連線」，並加上 Wi-Fi 單播保活。
+- **v1.3.3** — 位元組級透明續傳：線路中斷後從精確位移接回，只補傳剩餘的 bytes，對檔案總管完全隱形。
+- **v1.3.4** — 自動選最佳通道（有線 > Wi-Fi > 虛擬 > VPN，避開 Hamachi），傳輸中路徑失效會自動切換到次佳路徑。
+- **v1.3.5** — 更名為 CyberPaste；系統匣選單微調。（目前版本）
+
+## Author / 作者
+
+Made by [YangMieh / 小咩](https://github.com/YangMieh).
+
+<!-- -->
+
+由 [小咩 / YangMieh](https://github.com/YangMieh) 製作。
