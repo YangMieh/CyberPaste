@@ -84,40 +84,39 @@ namespace CyberPaste
 		[DllImport("user32.dll", SetLastError = true)]
 		private static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
 
-		// ── v1.3.8 大宗:用「真正的 Ctrl+V 鍵」當觸發(WH_KEYBOARD_LL),而非 GetData(GetData 會被
-		//    shell 剪貼簿預覽誤觸→就是 v1.3.6 那個 0.066 秒自動亂寫的元兇)。hook 只記時間戳,極輕量。
-		private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+		// ── v1.4.0:檔案一律走大宗框。收到檔案 announce→在剪貼簿放一個真實的「隱藏佔位小檔」
+		//    (.cyberpaste,內容帶 magic+session)。使用者用 Ctrl+V / 右鍵貼上 / 工具列貼上(三者皆可,
+		//    因為是真實檔案)→ Explorer 把佔位檔複製到目標資料夾→ DriveWatcher 監看各本機磁碟抓到它
+		//    →讀出 session→對「佔位檔所在的那個資料夾」跑大宗傳輸→完成後關框+刪佔位檔。
+		//    完全不碰延遲渲染/GetData→無衝突、無 v1.3.6 亂寫、三種貼上全通。
+		private const string PlaceholderExt = ".cyberpaste";
 
-		[DllImport("user32.dll", SetLastError = true)]
-		private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+		private const string PlaceholderMagic = "CYBERPASTE-PLACEHOLDER-V1";
 
-		[DllImport("user32.dll", SetLastError = true)]
-		private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+		private const string PlaceholderBaseName = "CyberPaste-Receiving";
 
-		[DllImport("user32.dll")]
-		private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+		private string _placeholderDir;
 
-		[DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-		private static extern IntPtr GetModuleHandle(string lpModuleName);
+		private DriveWatcher _driveWatcher;
 
-		[DllImport("user32.dll")]
-		private static extern short GetAsyncKeyState(int vKey);
+		// 有大宗傳輸正在進行(以「佔位檔完整路徑」為 key),避免同一次貼上被 Watcher 重複觸發。
+		private readonly HashSet<string> _activePaths = new HashSet<string>();
 
-		private const int WH_KEYBOARD_LL = 13;
+		private readonly object _activeLock = new object();
 
-		private const int WM_KEYDOWN = 256;
+		private sealed class PendingRecv
+		{
+			public IPAddress[] SrcIps;
 
-		private const int WM_SYSKEYDOWN = 260;
+			public List<FileMeta> Metas;
 
-		// 使用者最近一次真的按 Ctrl+V 的時間戳(TickCount);大宗接管只在這之後很短的窗內才允許。
-		private volatile int _armedTick = -100000;
+			public long Total;
+		}
 
-		// 有大宗傳輸正在進行,避免同一份剪貼簿被重複開第二條。
-		private volatile bool _bulkActive;
+		private readonly System.Collections.Generic.Dictionary<Guid, PendingRecv> _pending =
+			new System.Collections.Generic.Dictionary<Guid, PendingRecv>();
 
-		private IntPtr _hookHandle = IntPtr.Zero;
-
-		private LowLevelKeyboardProc _hookProc; // 保存參考避免被 GC
+		private readonly object _pendingLock = new object();
 
 		public ClipboardService(NetworkService net)
 		{
@@ -149,52 +148,295 @@ namespace CyberPaste
 			_window.ClipboardUpdated += OnClipboardUpdated;
 			_window.CreateHandleNow();
 			AddClipboardFormatListener(_window.Handle);
-			InstallKeyboardHook();
+			InitPlaceholderAndWatcher();
 		}
 
-		private void InstallKeyboardHook()
+		private void InitPlaceholderAndWatcher()
 		{
 			try
 			{
-				_hookProc = KeyboardProc;
-				using (System.Diagnostics.Process p = System.Diagnostics.Process.GetCurrentProcess())
-				using (System.Diagnostics.ProcessModule m = p.MainModule)
+				_placeholderDir = Path.Combine(Path.GetTempPath(), "CyberPaste");
+				Directory.CreateDirectory(_placeholderDir);
+				// 清掉上次殘留的來源佔位檔(貼出去的那些在使用者資料夾,傳完會自刪)
+				try
 				{
-					_hookHandle = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, GetModuleHandle(m.ModuleName), 0u);
+					string[] old = Directory.GetFiles(_placeholderDir, "*" + PlaceholderExt);
+					foreach (string f in old)
+					{
+						try
+						{
+							File.Delete(f);
+						}
+						catch
+						{
+						}
+					}
 				}
-				if (_hookHandle == IntPtr.Zero)
+				catch
 				{
-					Log("鍵盤 hook 安裝失敗(大宗接管將無法觸發,不影響一般貼上)");
 				}
 			}
 			catch (Exception ex)
 			{
-				Log("鍵盤 hook 安裝例外: " + ex.Message);
+				Log("佔位檔目錄建立失敗: " + ex.Message);
+			}
+			try
+			{
+				_driveWatcher = new DriveWatcher("*" + PlaceholderExt);
+				_driveWatcher.OnLog = Log;
+				_driveWatcher.Created += OnPlaceholderCreated;
+				string drives = _driveWatcher.Start();
+				Log("磁碟監看啟動,監看槽: " + drives);
+			}
+			catch (Exception ex)
+			{
+				Log("磁碟監看啟動失敗: " + ex.Message);
 			}
 		}
 
-		// 極輕量:只在 Ctrl+V 按下時記時間戳,絕不在此做任何重活(LL hook 要快回)。
-		private IntPtr KeyboardProc(int nCode, IntPtr wParam, IntPtr lParam)
+		// DriveWatcher 在背景緒回報「某處出現 .cyberpaste」。丟回 UI 緒處理。
+		private void OnPlaceholderCreated(string fullPath)
 		{
+			// 忽略我們自己在 temp 建立的來源佔位檔(只處理「被貼到使用者資料夾」的複本)
+			if (string.IsNullOrEmpty(fullPath))
+			{
+				return;
+			}
 			try
 			{
-				if (nCode >= 0)
+				if (!string.IsNullOrEmpty(_placeholderDir) &&
+					fullPath.StartsWith(_placeholderDir, StringComparison.OrdinalIgnoreCase))
 				{
-					int msg = wParam.ToInt32();
-					if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
-					{
-						int vk = Marshal.ReadInt32(lParam);
-						if (vk == 0x56 && (GetAsyncKeyState(0x11) & 0x8000) != 0)
-						{
-							_armedTick = Environment.TickCount;
-						}
-					}
+					return;
 				}
 			}
 			catch
 			{
 			}
-			return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+			Log("偵測到佔位檔: " + fullPath);
+			Post(delegate
+			{
+				HandlePastedPlaceholder(fullPath);
+			});
+		}
+
+		// UI 緒:讀佔位檔認 session→(衝突則問覆蓋)→對佔位檔所在資料夾跑大宗→完成刪佔位檔+關框。
+		private void HandlePastedPlaceholder(string fullPath)
+		{
+			// 去重+搶佔:HashSet.Add 回 false 表示已有人在處理這個路徑(Watcher 可能重複觸發)
+			lock (_activeLock)
+			{
+				if (!_activePaths.Add(fullPath))
+				{
+					return;
+				}
+			}
+			bool handedOff = false;
+			try
+			{
+				Guid session;
+				if (!TryReadPlaceholder(fullPath, out session))
+				{
+					return; // 不是我們的佔位檔 / 讀不到
+				}
+				// #7:讀到就立刻刪掉隱藏佔位檔——它的任務(觸發)已完成,不必等傳完,讓它馬上消失。
+				TryDeletePlaceholder(fullPath);
+				PendingRecv pend;
+				lock (_pendingLock)
+				{
+					_pending.TryGetValue(session, out pend);
+				}
+				if (pend == null || pend.Metas == null || pend.Metas.Count == 0)
+				{
+					return; // 過期/未知 session
+				}
+				string dest;
+				try
+				{
+					dest = Path.GetDirectoryName(fullPath);
+				}
+				catch
+				{
+					dest = null;
+				}
+				if (string.IsNullOrEmpty(dest))
+				{
+					return;
+				}
+
+				// 覆蓋詢問:目的資料夾有沒有同名檔?(找到第一個就停,不必掃完上千個→快)
+				bool hasConflict = false;
+				try
+				{
+					foreach (FileMeta m in pend.Metas)
+					{
+						if (File.Exists(Path.Combine(dest, m.Name)))
+						{
+							hasConflict = true;
+							break;
+						}
+					}
+				}
+				catch
+				{
+				}
+				bool skipExisting = false;
+				if (hasConflict)
+				{
+					OverwriteDialog.Result r = OverwriteDialog.Ask();
+					if (r == OverwriteDialog.Result.Cancel)
+					{
+						return; // 佔位檔已刪
+					}
+					skipExisting = (r == OverwriteDialog.Result.Skip);
+				}
+
+				IPAddress[] srcIps = pend.SrcIps;
+				List<FileMeta> metas = pend.Metas;
+				long total = pend.Total;
+				string peer = ((srcIps != null && srcIps.Length > 0) ? srcIps[0].ToString() : "?");
+				Log("大宗接收啟動(貼上) → " + dest + (skipExisting ? " [略過已存在]" : "") + " 共 " + metas.Count + " 檔");
+				BulkProgressForm form = null;
+				try
+				{
+					form = new BulkProgressForm(peer, total);
+					form.Show();
+				}
+				catch
+				{
+				}
+				BulkProgressForm formRef = form;
+				bool skipCopy = skipExisting;
+				string destCopy = dest;
+				Guid sessionCopy = session;
+				handedOff = true;
+				ThreadPool.QueueUserWorkItem(delegate
+				{
+					// 大宗要往這顆碟寫上千個檔→先暫停磁碟監看,免得自己的寫入把 watcher 緩衝洗爆(v1.4.2 修「第二次貼不上」)
+					try
+					{
+						if (_driveWatcher != null)
+						{
+							_driveWatcher.Suspend();
+						}
+					}
+					catch
+					{
+					}
+					try
+					{
+						_net.ReceiveBulk(srcIps, sessionCopy, metas, destCopy, skipCopy, delegate(NetworkService.BulkProgress p)
+						{
+							if (formRef != null)
+							{
+								try
+								{
+									formRef.BeginInvoke((Action)delegate
+									{
+										formRef.UpdateProgress(p);
+									});
+								}
+								catch
+								{
+								}
+							}
+						});
+					}
+					catch (Exception ex)
+					{
+						Log("大宗接收失敗: " + ex.Message);
+						if (formRef != null)
+						{
+							try
+							{
+								formRef.BeginInvoke((Action)delegate
+								{
+									formRef.MarkFailed(ex.Message);
+								});
+							}
+							catch
+							{
+							}
+						}
+					}
+					finally
+					{
+						// 寫完重建乾淨的監看,下一次貼上就偵測得到
+						try
+						{
+							if (_driveWatcher != null)
+							{
+								_driveWatcher.Resume();
+							}
+						}
+						catch
+						{
+						}
+						lock (_activeLock)
+						{
+							_activePaths.Remove(fullPath);
+						}
+					}
+				});
+			}
+			finally
+			{
+				if (!handedOff)
+				{
+					lock (_activeLock)
+					{
+						_activePaths.Remove(fullPath);
+					}
+				}
+			}
+		}
+
+		// 讀佔位檔:驗 magic,取出 session GUID。含小重試(剛被 Explorer 複製過來可能短暫鎖住)。
+		private bool TryReadPlaceholder(string path, out Guid session)
+		{
+			session = Guid.Empty;
+			for (int attempt = 0; attempt < 5; attempt++)
+			{
+				try
+				{
+					string[] lines = File.ReadAllLines(path, Encoding.UTF8);
+					if (lines.Length >= 2 && lines[0] == PlaceholderMagic && Guid.TryParse(lines[1], out session))
+					{
+						return true;
+					}
+					return false;
+				}
+				catch
+				{
+					try
+					{
+						Thread.Sleep(80);
+					}
+					catch
+					{
+					}
+				}
+			}
+			return false;
+		}
+
+		private void TryDeletePlaceholder(string path)
+		{
+			// 我方一次性佔位小檔(30 bytes 隱藏檔),傳完就地永久刪除(進回收筒只會製造垃圾);
+			// 只刪副檔名為 .cyberpaste 者,不碰使用者其他檔。
+			try
+			{
+				if (!string.IsNullOrEmpty(path) &&
+					path.EndsWith(PlaceholderExt, StringComparison.OrdinalIgnoreCase) &&
+					File.Exists(path))
+				{
+					File.SetAttributes(path, FileAttributes.Normal);
+					File.Delete(path);
+				}
+			}
+			catch
+			{
+			}
 		}
 
 		private void Post(Action a)
@@ -271,6 +513,11 @@ namespace CyberPaste
 				while (enumerator.MoveNext())
 				{
 					string current = enumerator.Current;
+					// 跳過我方佔位檔(.cyberpaste)——那是接收觸發用的標記,不是要傳的內容
+					if (current != null && current.EndsWith(PlaceholderExt, StringComparison.OrdinalIgnoreCase))
+					{
+						continue;
+					}
 					try
 					{
 						if (Directory.Exists(current))
@@ -363,16 +610,9 @@ namespace CyberPaste
 			Log("已套用遠端圖片");
 		}
 
-		// v1.3.8 大宗模式門檻:總量 ≥ 500MB 就走大宗高速循序傳輸,否則維持逐檔延遲渲染。
-		private const long BulkThresholdBytes = 524288000L;
-
-		// v1.3.8:大宗改用「真正的 Ctrl+V 鍵盤 hook」當觸發(見 KeyboardProc/_armedTick),
-		// 只有使用者確實按了 Ctrl+V(近 _armedWindowMs 毫秒內)+前景是檔案總管資料夾,才接管。
-		// 這解決了 v1.3.6 靠 GetData 觸發被 shell 預覽誤觸→自動亂寫的致命缺陷。
-		private const bool EnableBulk = true;
-
-		private const int _armedWindowMs = 1200;
-
+		// v1.4.0:收到檔案 announce → 記住待收清單(依 session) + 在剪貼簿放一個「隱藏佔位小檔」。
+		// 使用者用任何方式貼上(Ctrl+V/右鍵/工具列)→ Explorer 把佔位檔複製到目標資料夾 →
+		// DriveWatcher 抓到 → HandlePastedPlaceholder 對那個資料夾跑大宗。文字/圖片仍走一般剪貼簿。
 		private void ApplyFiles(IPAddress[] srcIps, Guid session, List<FileMeta> metas)
 		{
 			if (!Enabled)
@@ -384,138 +624,74 @@ namespace CyberPaste
 			{
 				total += metas[j].Size;
 			}
-			bool bulk = EnableBulk && total >= BulkThresholdBytes;
-
-			List<VirtualFile> files = new List<VirtualFile>(metas.Count);
-			for (int i = 0; i < metas.Count; i++)
+			lock (_pendingLock)
 			{
-				int index = i;
-				FileMeta fileMeta = metas[i];
-				files.Add(new VirtualFile
+				_pending[session] = new PendingRecv
 				{
-					Name = fileMeta.Name,
-					Length = fileMeta.Size,
-					OpenRead = () => _net.OpenPull(srcIps, session, index)
-				});
-			}
-			_suppressFilesUntil = DateTime.UtcNow.AddSeconds(2.0);
-
-			Func<bool> onBulk = null;
-			if (bulk)
-			{
-				long totalCopy = total;
-				onBulk = () => TryStartBulk(srcIps, session, metas, totalCopy);
-			}
-
-			RetryClipboard(delegate
-			{
-				_liveDataObject = new VirtualFileDataObject(files, onBulk);
-				int num = NativeMethods.OleSetClipboard(_liveDataObject);
-				if (num != 0)
+					SrcIps = srcIps,
+					Metas = metas,
+					Total = total
+				};
+				// 只留最近幾批,避免無限長
+				if (_pending.Count > 8)
 				{
-					Marshal.ThrowExceptionForHR(num);
+					Guid oldest = Guid.Empty;
+					foreach (Guid k in _pending.Keys)
+					{
+						oldest = k;
+						break;
+					}
+					_pending.Remove(oldest);
 				}
-			});
-			string text = ((srcIps != null && srcIps.Length > 0) ? srcIps[0].ToString() : "?");
-			Log("已備妥 " + metas.Count + " 個遠端檔案(優先走 " + text + (onBulk != null ? ", 大宗模式" : "") + "),可在此機 Ctrl+V 貼出");
-		}
-
-		// 貼上時 Explorer 呼叫 GetData→這裡。回 true=我方接管大宗(給 Explorer 空清單、自己高速寫檔);
-		// 回 false=交還 Explorer 走逐檔延遲渲染(貼哪到哪)。
-		// ★安全閘:必須是「使用者剛真的按了 Ctrl+V」(_armedTick 在窗內)才接管;shell 剪貼簿預覽的
-		//   GetData 沒有前置 Ctrl+V→armed 過期→回 false,絕不會像 v1.3.6 那樣自動亂寫。
-		private bool TryStartBulk(IPAddress[] srcIps, Guid session, List<FileMeta> metas, long total)
-		{
-			// 閘 1:近期真的有 Ctrl+V?(非真實貼上一律不接管)
-			int since = Environment.TickCount - _armedTick;
-			if (since < 0 || since > _armedWindowMs)
-			{
-				return false;
 			}
-			// 閘 2:已有大宗在傳→給空清單避免 Explorer 逐檔重複寫,但不重開第二條
-			if (_bulkActive)
-			{
-				return true;
-			}
-			// 閘 3:抓得到「你正貼上的那個檔案總管資料夾」?抓不到(貼進非檔案總管)→退回逐檔
-			string dest;
+			// 建佔位檔(內容:magic + session),放剪貼簿當真實檔案清單
+			string placeholder = null;
 			try
 			{
-				dest = ShellFolder.GetForegroundPasteFolder();
-			}
-			catch
-			{
-				dest = null;
-			}
-			if (string.IsNullOrEmpty(dest))
-			{
-				Log("大宗模式:抓不到貼上資料夾,退回逐檔延遲渲染");
-				return false;
-			}
-			_armedTick = -100000; // 消費掉,避免同一次貼上被再次判定
-			_bulkActive = true;
-			string peer = ((srcIps != null && srcIps.Length > 0) ? srcIps[0].ToString() : "?");
-			string destCopy = dest;
-			Log("大宗接收啟動(Ctrl+V) → " + dest);
-			// 延後到 UI 訊息佇列建框+開背景傳輸(不在 COM callback 裡硬做,修 v1.3.6 進度框卡死)
-			Post(delegate
-			{
-				BulkProgressForm form = null;
+				if (string.IsNullOrEmpty(_placeholderDir))
+				{
+					_placeholderDir = Path.Combine(Path.GetTempPath(), "CyberPaste");
+					Directory.CreateDirectory(_placeholderDir);
+				}
+				placeholder = Path.Combine(_placeholderDir, PlaceholderBaseName + PlaceholderExt);
+				// 佔位檔用固定檔名:第二次以後要覆寫既有的「隱藏」檔會被拒(access denied)→ 先清屬性再寫。
+				// (這正是 v1.4.0「傳完大量檔案後要重開」的真兇)
 				try
 				{
-					form = new BulkProgressForm(peer, total);
-					form.Show();
+					if (File.Exists(placeholder))
+					{
+						File.SetAttributes(placeholder, FileAttributes.Normal);
+					}
 				}
 				catch
 				{
 				}
-				BulkProgressForm formRef = form;
-				ThreadPool.QueueUserWorkItem(delegate
+				File.WriteAllText(placeholder, PlaceholderMagic + "\r\n" + session.ToString("D") + "\r\n", Encoding.UTF8);
+				try
 				{
-					try
-					{
-						_net.ReceiveBulk(srcIps, session, metas, destCopy, delegate(NetworkService.BulkProgress p)
-						{
-							if (formRef == null)
-							{
-								return;
-							}
-							try
-							{
-								formRef.BeginInvoke((Action)delegate
-								{
-									formRef.UpdateProgress(p);
-								});
-							}
-							catch
-							{
-							}
-						});
-					}
-					catch (Exception ex)
-					{
-						Log("大宗接收失敗: " + ex.Message);
-						try
-						{
-							if (formRef != null)
-							{
-								formRef.BeginInvoke((Action)delegate
-								{
-									formRef.MarkFailed(ex.Message);
-								});
-							}
-						}
-						catch
-						{
-						}
-					}
-					finally
-					{
-						_bulkActive = false;
-					}
-				});
+					File.SetAttributes(placeholder, FileAttributes.Hidden);
+				}
+				catch
+				{
+				}
+			}
+			catch (Exception ex)
+			{
+				Log("建立佔位檔失敗: " + ex.Message);
+				return;
+			}
+			_suppressFilesUntil = DateTime.UtcNow.AddSeconds(2.0);
+			string ph = placeholder;
+			RetryClipboard(delegate
+			{
+				DataObject dataObject = new DataObject();
+				System.Collections.Specialized.StringCollection sc = new System.Collections.Specialized.StringCollection();
+				sc.Add(ph);
+				dataObject.SetFileDropList(sc);
+				Clipboard.SetDataObject(dataObject, true);
 			});
-			return true;
+			string text = ((srcIps != null && srcIps.Length > 0) ? srcIps[0].ToString() : "?");
+			Log("已備妥 " + metas.Count + " 個遠端檔案(" + total / 1048576L + " MB, 來源 " + text + "),貼到任意資料夾即開始接收");
 		}
 
 		private void Remember(string sig)
@@ -629,10 +805,10 @@ namespace CyberPaste
 		{
 			try
 			{
-				if (_hookHandle != IntPtr.Zero)
+				if (_driveWatcher != null)
 				{
-					UnhookWindowsHookEx(_hookHandle);
-					_hookHandle = IntPtr.Zero;
+					_driveWatcher.Dispose();
+					_driveWatcher = null;
 				}
 			}
 			catch

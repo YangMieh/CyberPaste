@@ -79,7 +79,7 @@ namespace CyberPaste
         {
             _title.Text = "✔ 傳輸完成";
             _bar.Value = _bar.Maximum;
-            AutoClose(2500);
+            AutoClose(700); // 完成後快速閃一下就關(使用者要求越快越好)
         }
 
         public void MarkFailed(string err)

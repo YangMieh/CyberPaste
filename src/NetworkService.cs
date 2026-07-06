@@ -1001,7 +1001,7 @@ namespace CyberPaste
 
 		// ── v1.3.6 大宗循序接收(接收端,我方自己寫檔,跳過 Explorer 複製引擎)──
 		// 直接寫進 destFolder;斷線用 v1.3.3 位元組續傳(記已寫入量)+ v1.3.4 路徑失效切換(換候選 IP)。
-		public void ReceiveBulk(IPAddress[] sources, Guid session, List<FileMeta> metas, string destFolder, Action<BulkProgress> onProgress)
+		public void ReceiveBulk(IPAddress[] sources, Guid session, List<FileMeta> metas, string destFolder, bool skipExisting, Action<BulkProgress> onProgress)
 		{
 			IPAddress[] src = ((sources != null && sources.Length > 0) ? sources : new IPAddress[1] { IPAddress.Loopback });
 			long total = 0L;
@@ -1087,23 +1087,28 @@ namespace CyberPaste
 						long thisOffset = ((index == resumeIndex) ? resumeOffset : 0);
 						curIndex = index;
 						curGot = thisOffset;
+						// 略過已存在:仍收下 bytes 保持串流同步,但不寫檔(outfs=null=丟棄)
+						bool skip = skipExisting && File.Exists(full);
 						FileStream outfs = null;
 						try
 						{
-							if (thisOffset > 0)
+							if (!skip)
 							{
-								outfs = new FileStream(full, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 1048576);
-								try
+								if (thisOffset > 0)
 								{
-									outfs.Seek(thisOffset, SeekOrigin.Begin);
+									outfs = new FileStream(full, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 1048576);
+									try
+									{
+										outfs.Seek(thisOffset, SeekOrigin.Begin);
+									}
+									catch
+									{
+									}
 								}
-								catch
+								else
 								{
+									outfs = new FileStream(full, FileMode.Create, FileAccess.Write, FileShare.None, 1048576);
 								}
-							}
-							else
-							{
-								outfs = new FileStream(full, FileMode.Create, FileAccess.Write, FileShare.None, 1048576);
 							}
 							long got = 0L;
 							while (got < remaining)
@@ -1114,7 +1119,10 @@ namespace CyberPaste
 								{
 									throw new IOException("大宗連線中斷(讀到 0)");
 								}
-								outfs.Write(buf, 0, n);
+								if (outfs != null)
+								{
+									outfs.Write(buf, 0, n);
+								}
 								got += n;
 								curGot += n;
 								bytesDone += n;

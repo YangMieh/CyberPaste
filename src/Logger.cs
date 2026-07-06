@@ -8,7 +8,7 @@ namespace CyberPaste
     /// <summary>輕量檔案日誌：寫到 exe 同目錄 CyberPaste.log，方便跨機問題定位。</summary>
     internal static class Logger
     {
-        public const string Version = "v1.3.8";
+        public const string Version = "v1.4.2";
         private static readonly object _lock = new object();
         private static string _path;
 
