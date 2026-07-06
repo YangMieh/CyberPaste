@@ -282,12 +282,24 @@ namespace CyberPaste
 			Log("已套用遠端圖片");
 		}
 
+		// v1.3.6 大宗模式門檻:總量 ≥ 1GB 或 檔數 ≥ 500 就自動走大宗高速循序傳輸,否則維持逐檔延遲渲染。
+		private const long BulkThresholdBytes = 1073741824L;
+
+		private const int BulkThresholdCount = 500;
+
 		private void ApplyFiles(IPAddress[] srcIps, Guid session, List<FileMeta> metas)
 		{
 			if (!Enabled)
 			{
 				return;
 			}
+			long total = 0L;
+			for (int j = 0; j < metas.Count; j++)
+			{
+				total += metas[j].Size;
+			}
+			bool bulk = total >= BulkThresholdBytes || metas.Count >= BulkThresholdCount;
+
 			List<VirtualFile> files = new List<VirtualFile>(metas.Count);
 			for (int i = 0; i < metas.Count; i++)
 			{
@@ -301,9 +313,17 @@ namespace CyberPaste
 				});
 			}
 			_suppressFilesUntil = DateTime.UtcNow.AddSeconds(2.0);
+
+			Func<bool> onBulk = null;
+			if (bulk)
+			{
+				long totalCopy = total;
+				onBulk = () => TryStartBulk(srcIps, session, metas, totalCopy);
+			}
+
 			RetryClipboard(delegate
 			{
-				_liveDataObject = new VirtualFileDataObject(files);
+				_liveDataObject = new VirtualFileDataObject(files, onBulk);
 				int num = NativeMethods.OleSetClipboard(_liveDataObject);
 				if (num != 0)
 				{
@@ -311,7 +331,71 @@ namespace CyberPaste
 				}
 			});
 			string text = ((srcIps != null && srcIps.Length > 0) ? srcIps[0].ToString() : "?");
-			Log("已備妥 " + metas.Count + " 個遠端檔案(優先走 " + text + "),可在此機 Ctrl+V 貼出");
+			Log("已備妥 " + metas.Count + " 個遠端檔案(優先走 " + text + (bulk ? ", 大宗模式" : "") + "),可在此機 Ctrl+V 貼出");
+		}
+
+		// 貼上瞬間(在 UI/STA 執行緒)嘗試接手大宗:抓到貼上資料夾就背景高速自寫+右下角進度框,回 true;
+		// 抓不到(貼進非檔案總管)回 false,VirtualFileDataObject 會退回逐檔延遲渲染。
+		private bool TryStartBulk(IPAddress[] srcIps, Guid session, List<FileMeta> metas, long total)
+		{
+			string dest;
+			try
+			{
+				dest = ShellFolder.GetForegroundPasteFolder();
+			}
+			catch
+			{
+				dest = null;
+			}
+			if (string.IsNullOrEmpty(dest))
+			{
+				Log("大宗模式:抓不到貼上資料夾,退回逐檔延遲渲染");
+				return false;
+			}
+			string peer = ((srcIps != null && srcIps.Length > 0) ? srcIps[0].ToString() : "?");
+			BulkProgressForm form = new BulkProgressForm(peer, total);
+			try
+			{
+				form.Show();
+			}
+			catch
+			{
+			}
+			Log("大宗接收啟動 → " + dest);
+			ThreadPool.QueueUserWorkItem(delegate
+			{
+				try
+				{
+					_net.ReceiveBulk(srcIps, session, metas, dest, delegate(NetworkService.BulkProgress p)
+					{
+						try
+						{
+							form.BeginInvoke((Action)delegate
+							{
+								form.UpdateProgress(p);
+							});
+						}
+						catch
+						{
+						}
+					});
+				}
+				catch (Exception ex)
+				{
+					Log("大宗接收失敗: " + ex.Message);
+					try
+					{
+						form.BeginInvoke((Action)delegate
+						{
+							form.MarkFailed(ex.Message);
+						});
+					}
+					catch
+					{
+					}
+				}
+			});
+			return true;
 		}
 
 		private void Remember(string sig)

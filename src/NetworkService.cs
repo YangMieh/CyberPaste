@@ -292,6 +292,8 @@ namespace CyberPaste
 
 		private const byte MSG_FILE_GET = 4;
 
+		private const byte MSG_BULK_GET = 5;
+
 		private const int PoolCapPerPeer = 8;
 
 		private UdpClient _udp;
@@ -807,6 +809,14 @@ namespace CyberPaste
 					ServeFile(stream, session, index, offset);
 					break;
 				}
+				case 5:
+				{
+					Guid session2 = new Guid(ReadExactly(stream, 16));
+					int startIndex = ReadInt32(stream);
+					long startOffset = ReadInt64(stream);
+					ServeBulk(stream, session2, startIndex, startOffset);
+					break;
+				}
 				}
 			}
 		}
@@ -878,6 +888,324 @@ namespace CyberPaste
 					}
 				}
 				ns.Flush();
+			}
+		}
+
+		// ── v1.3.6 大宗循序串流(來源端)──
+		// 一條連線把 [索引][剩餘大小][bytes] 從 startIndex 依序全部串流回去，中間零逐檔請求。
+		// startOffset 只作用於第一個檔(續傳用)。全部送完寫 [索引 -1] 作結束標記。
+		private void ServeBulk(NetworkStream ns, Guid session, int startIndex, long startOffset)
+		{
+			Served[] value;
+			if (!_served.TryGetValue(session, out value))
+			{
+				WriteInt32(ns, -1);
+				ns.Flush();
+				return;
+			}
+			if (startIndex < 0)
+			{
+				startIndex = 0;
+			}
+			Log("大宗送檔 session=" + session + " 從 #" + startIndex + " offset " + startOffset + " 共 " + value.Length + " 檔");
+			byte[] buf = new byte[1048576];
+			for (int i = startIndex; i < value.Length; i++)
+			{
+				Served served = value[i];
+				long offset = ((i == startIndex && startOffset > 0) ? startOffset : 0);
+				if (offset < 0)
+				{
+					offset = 0L;
+				}
+				if (offset > served.Size)
+				{
+					offset = served.Size;
+				}
+				long remaining = served.Size - offset;
+				WriteInt32(ns, i);
+				WriteInt64(ns, remaining);
+				FileStream fileStream = null;
+				try
+				{
+					fileStream = new FileStream(served.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1048576);
+					if (offset > 0)
+					{
+						try
+						{
+							fileStream.Seek(offset, SeekOrigin.Begin);
+						}
+						catch
+						{
+						}
+					}
+				}
+				catch (Exception ex)
+				{
+					Log("大宗送檔開檔失敗 " + served.Path + ": " + ex.Message);
+				}
+				long sent = 0L;
+				if (fileStream != null)
+				{
+					using (fileStream)
+					{
+						while (sent < remaining)
+						{
+							int want = (int)Math.Min(buf.Length, remaining - sent);
+							int n = fileStream.Read(buf, 0, want);
+							if (n <= 0)
+							{
+								break;
+							}
+							ns.Write(buf, 0, n);
+							sent += n;
+						}
+					}
+				}
+				// 開不起來或被縮短→補零交足宣告大小,收端才不會錯位
+				if (sent < remaining)
+				{
+					Array.Clear(buf, 0, buf.Length);
+					while (sent < remaining)
+					{
+						int want2 = (int)Math.Min(buf.Length, remaining - sent);
+						ns.Write(buf, 0, want2);
+						sent += want2;
+					}
+				}
+			}
+			WriteInt32(ns, -1);
+			ns.Flush();
+			Log("大宗送檔完成 session=" + session);
+		}
+
+		public struct BulkProgress
+		{
+			public long BytesDone;
+
+			public long BytesTotal;
+
+			public int FilesDone;
+
+			public int FilesTotal;
+
+			public double Mbps;
+
+			public string CurrentName;
+
+			public bool Done;
+
+			public bool Failed;
+
+			public string Error;
+		}
+
+		// ── v1.3.6 大宗循序接收(接收端,我方自己寫檔,跳過 Explorer 複製引擎)──
+		// 直接寫進 destFolder;斷線用 v1.3.3 位元組續傳(記已寫入量)+ v1.3.4 路徑失效切換(換候選 IP)。
+		public void ReceiveBulk(IPAddress[] sources, Guid session, List<FileMeta> metas, string destFolder, Action<BulkProgress> onProgress)
+		{
+			IPAddress[] src = ((sources != null && sources.Length > 0) ? sources : new IPAddress[1] { IPAddress.Loopback });
+			long total = 0L;
+			for (int i = 0; i < metas.Count; i++)
+			{
+				total += metas[i].Size;
+			}
+			long bytesDone = 0L;
+			int filesDone = 0;
+			int resumeIndex = 0;
+			long resumeOffset = 0L;
+			int srcIdx = 0;
+			int reconnectTries = 0;
+			System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+			long lastBytes = 0L;
+			double lastSec = 0.0;
+			double mbps = 0.0;
+			Logger.Log("[NET] 大宗接收開始 → " + destFolder + " 共 " + metas.Count + " 檔 / " + total + " bytes");
+			while (true)
+			{
+				TcpClient client = null;
+				// 斷在檔中間的續傳點:curIndex>=0 表示正在寫某檔,curGot=該檔已落地量
+				int curIndex = -1;
+				long curGot = 0L;
+				try
+				{
+					client = ConnectWithTimeout(src[srcIdx], 45889, 3000);
+					NetworkStream ns = client.GetStream();
+					ns.WriteByte(5);
+					ns.Write(session.ToByteArray(), 0, 16);
+					WriteInt32(ns, resumeIndex);
+					WriteInt64(ns, resumeOffset);
+					ns.Flush();
+					if (srcIdx != 0 || reconnectTries > 0)
+					{
+						Logger.Log("[NET] 大宗切換路徑 → " + src[srcIdx] + " 從 #" + resumeIndex + " offset " + resumeOffset);
+					}
+					byte[] buf = new byte[1048576];
+					while (true)
+					{
+						int index = ReadInt32(ns);
+						if (index < 0)
+						{
+							sw.Stop();
+							onProgress(new BulkProgress
+							{
+								BytesDone = bytesDone,
+								BytesTotal = total,
+								FilesDone = filesDone,
+								FilesTotal = metas.Count,
+								Mbps = mbps,
+								CurrentName = "",
+								Done = true
+							});
+							Logger.Log("[NET] 大宗接收完成 " + bytesDone + "/" + total + " bytes, " + filesDone + " 檔");
+							try
+							{
+								client.Close();
+							}
+							catch
+							{
+							}
+							return;
+						}
+						long remaining = ReadInt64(ns);
+						if (index >= metas.Count)
+						{
+							throw new IOException("大宗索引超界 " + index);
+						}
+						FileMeta meta = metas[index];
+						string full = Path.Combine(destFolder, meta.Name);
+						try
+						{
+							string dir = Path.GetDirectoryName(full);
+							if (!string.IsNullOrEmpty(dir))
+							{
+								Directory.CreateDirectory(dir);
+							}
+						}
+						catch
+						{
+						}
+						long thisOffset = ((index == resumeIndex) ? resumeOffset : 0);
+						curIndex = index;
+						curGot = thisOffset;
+						FileStream outfs = null;
+						try
+						{
+							if (thisOffset > 0)
+							{
+								outfs = new FileStream(full, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 1048576);
+								try
+								{
+									outfs.Seek(thisOffset, SeekOrigin.Begin);
+								}
+								catch
+								{
+								}
+							}
+							else
+							{
+								outfs = new FileStream(full, FileMode.Create, FileAccess.Write, FileShare.None, 1048576);
+							}
+							long got = 0L;
+							while (got < remaining)
+							{
+								int want = (int)Math.Min(buf.Length, remaining - got);
+								int n = ns.Read(buf, 0, want);
+								if (n <= 0)
+								{
+									throw new IOException("大宗連線中斷(讀到 0)");
+								}
+								outfs.Write(buf, 0, n);
+								got += n;
+								curGot += n;
+								bytesDone += n;
+								double sec = sw.Elapsed.TotalSeconds;
+								if (sec - lastSec >= 0.2)
+								{
+									double dt = sec - lastSec;
+									mbps = ((dt > 0) ? ((double)(bytesDone - lastBytes) * 8.0 / 1000000.0 / dt) : mbps);
+									lastBytes = bytesDone;
+									lastSec = sec;
+									onProgress(new BulkProgress
+									{
+										BytesDone = bytesDone,
+										BytesTotal = total,
+										FilesDone = filesDone,
+										FilesTotal = metas.Count,
+										Mbps = mbps,
+										CurrentName = meta.Name,
+										Done = false
+									});
+								}
+							}
+						}
+						finally
+						{
+							if (outfs != null)
+							{
+								try
+								{
+									outfs.Flush();
+									outfs.Close();
+								}
+								catch
+								{
+								}
+							}
+						}
+						// 這個檔交足了
+						filesDone++;
+						curIndex = -1;
+						resumeIndex = index + 1;
+						resumeOffset = 0L;
+						reconnectTries = 0;
+					}
+				}
+				catch (Exception ex)
+				{
+					try
+					{
+						if (client != null)
+						{
+							client.Close();
+						}
+					}
+					catch
+					{
+					}
+					// 斷在檔中間→從該檔已落地量續傳;斷在檔與檔之間→resumeIndex 已指向下一檔
+					if (curIndex >= 0)
+					{
+						resumeIndex = curIndex;
+						resumeOffset = curGot;
+					}
+					reconnectTries++;
+					Logger.Log("[NET] 大宗中斷: " + ex.Message + " (已完成 " + filesDone + " 檔/" + bytesDone + " bytes, 續傳點 #" + resumeIndex + " offset " + resumeOffset + ", 第 " + reconnectTries + " 次重連)");
+					if (reconnectTries > 20)
+					{
+						onProgress(new BulkProgress
+						{
+							BytesDone = bytesDone,
+							BytesTotal = total,
+							FilesDone = filesDone,
+							FilesTotal = metas.Count,
+							Mbps = 0.0,
+							CurrentName = "",
+							Done = false,
+							Failed = true,
+							Error = ex.Message
+						});
+						Logger.Log("[NET] 大宗接收放棄(重連 20 次仍不通)");
+						return;
+					}
+					srcIdx = (srcIdx + 1) % src.Length;
+					try
+					{
+						Thread.Sleep(500);
+					}
+					catch
+					{
+					}
+				}
 			}
 		}
 
