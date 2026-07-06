@@ -19,8 +19,6 @@ namespace CyberPaste
 		// 此時給 Explorer 一個「空清單」讓它別重複寫;回 false(抓不到資料夾)則退回逐檔延遲渲染。
 		private readonly Func<bool> _onBulkPaste;
 
-		private bool _bulkTriggered;
-
 		private bool _bulkHandled;
 
 		public VirtualFileDataObject(List<VirtualFile> files)
@@ -39,21 +37,24 @@ namespace CyberPaste
 			medium = default(STGMEDIUM);
 			if (format.cfFormat == CF_FILEDESCRIPTORW && (format.tymed & TYMED.TYMED_HGLOBAL) == TYMED.TYMED_HGLOBAL)
 			{
-				// 貼上時 Explorer 先要這份檔案群組描述子——正是「貼上發生了」的訊號。
-				if (_onBulkPaste != null && !_bulkTriggered)
+				// Explorer 要檔案群組描述子。onBulk 自帶「是否真的 Ctrl+V」安全閘:
+				// 是真實貼上→回 true→給空清單(我方大宗接手);shell 預覽探測→回 false→給真實清單(正常逐檔)。
+				// 每次都問(不設一次性旗標),才不會被前面的預覽探測卡住真正的 Ctrl+V。
+				bool useEmpty = false;
+				if (_onBulkPaste != null)
 				{
-					_bulkTriggered = true;
 					try
 					{
-						_bulkHandled = _onBulkPaste();
+						useEmpty = _onBulkPaste();
 					}
 					catch
 					{
-						_bulkHandled = false;
+						useEmpty = false;
 					}
 				}
+				_bulkHandled = useEmpty;
 				medium.tymed = TYMED.TYMED_HGLOBAL;
-				medium.unionmember = (_bulkHandled ? BuildEmptyDescriptor() : BuildFileGroupDescriptor());
+				medium.unionmember = (useEmpty ? BuildEmptyDescriptor() : BuildFileGroupDescriptor());
 				medium.pUnkForRelease = null;
 			}
 			else if (format.cfFormat == CF_FILECONTENTS && (format.tymed & TYMED.TYMED_ISTREAM) == TYMED.TYMED_ISTREAM)
