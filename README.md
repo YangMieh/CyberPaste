@@ -80,6 +80,14 @@ UDP 45888 用於探索，TCP 45889 用於傳輸。為可信任的內網設計，
 - **v1.3.4** — 自動選最佳通道（有線 > Wi-Fi > 虛擬 > VPN，避開 Hamachi），傳輸中路徑失效會自動切換到次佳路徑。
 - **v1.3.5** — 更名為 CyberPaste；系統匣選單微調。（目前版本）
 
+## Verified publisher / 已驗證發行者
+
+CyberPaste.exe is code-signed by **YangMieh / 小咩**. To have Windows show it as a *verified* publisher on machines you control, run `cert/install-publisher-trust.ps1` as Administrator. See [cert/README.md](cert/README.md) for details.
+
+<!-- -->
+
+CyberPaste.exe 由 **小咩 / YangMieh** 簽章。若要讓 Windows 在你掌控的電腦上把它顯示為「已驗證」發行者，請以系統管理員身分執行 `cert/install-publisher-trust.ps1`，詳見 [cert/README.md](cert/README.md)。
+
 ## Author / 作者
 
 Made by [YangMieh / 小咩](https://github.com/YangMieh).
