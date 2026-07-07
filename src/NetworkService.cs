@@ -1050,10 +1050,10 @@ namespace CyberPaste
 				// 斷在檔中間的續傳點:curIndex>=0 表示正在寫某檔,curGot=該檔已落地量
 				int curIndex = -1;
 				long curGot = 0L;
-				// 被新的一次貼上取代→放棄這條(取消)。(v1.4.4)
+				// 取消(關閉進度框 或 被新的一次貼上取代)→放棄這條。(v1.4.4)
 				if (isCancelled != null && isCancelled())
 				{
-					Logger.Log("[NET] 大宗取消(被新的貼上取代)");
+					Logger.Log("[NET] 大宗取消(關閉進度框或被新貼上取代)");
 					return;
 				}
 				try
@@ -1218,10 +1218,10 @@ namespace CyberPaste
 					catch
 					{
 					}
-					// 被新的一次貼上取代→直接結束,不重連(避免舊+新兩條同時寫進一個資料夾)。(v1.4.4)
+					// 取消(關閉進度框 或 被新貼上取代)→直接結束,不重連(避免舊+新兩條同時寫進一個資料夾)。(v1.4.4)
 					if (isCancelled != null && isCancelled())
 					{
-						Logger.Log("[NET] 大宗取消(被新的貼上取代),已完成 " + filesDone + " 檔");
+						Logger.Log("[NET] 大宗取消(關閉進度框或被新貼上取代),已完成 " + filesDone + " 檔");
 						return;
 					}
 					// 斷在檔中間→從該檔已落地量續傳;斷在檔與檔之間→resumeIndex 已指向下一檔

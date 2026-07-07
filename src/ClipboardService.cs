@@ -343,6 +343,14 @@ namespace CyberPaste
 				{
 					try { prevForm.BeginInvoke((Action)delegate { try { prevForm.Close(); } catch { } }); } catch { }
 				}
+				// 使用者關掉進度框(按 X)= 取消這條大宗 → ReceiveBulk 停止 + 恢復磁碟監看,
+				// 關掉後能立刻貼下一個。(v1.4.4 修:覆蓋/傳輸中打X後再貼失效——X 原本只關視窗沒停傳輸,
+				// 傳輸仍在背景跑[尤其 略過已存在 要把整批 bytes 收完]→ setActive(true) 讓監看一直暫停→偵測不到新佔位檔)
+				if (form != null)
+				{
+					BulkCancel cancelForForm = myCancel;
+					form.FormClosed += delegate { cancelForForm.Cancelled = true; };
+				}
 				BulkProgressForm formRef = form;
 				bool skipCopy = skipExisting;
 				string destCopy = dest;
