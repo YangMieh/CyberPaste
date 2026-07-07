@@ -61,6 +61,8 @@ namespace CyberPaste
                 }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+                // 首次執行在桌面建立捷徑（只做一次，見 DesktopShortcut）。
+                try { DesktopShortcut.EnsureFirstRun(); } catch { }
                 Application.Run(new TrayContext());
             }
         }
