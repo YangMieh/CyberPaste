@@ -151,9 +151,33 @@ namespace CyberPaste
             }
 
             menu.Items.Add(new ToolStripSeparator());
+
+            // 開機時自動啟動（打勾＝已設定）。提權程式走工作排程器登入觸發，不跳 UAC。見 Autostart。
+            bool autoOn = Autostart.IsEnabled();
+            var autoItem = new ToolStripMenuItem("開機時自動啟動") { Checked = autoOn, CheckOnClick = false };
+            autoItem.Click += (s, e) => ToggleAutostart();
+            menu.Items.Add(autoItem);
+
+            menu.Items.Add(new ToolStripSeparator());
             var exit = new ToolStripMenuItem("結束");
             exit.Click += (s, e) => ExitApp();
             menu.Items.Add(exit);
+        }
+
+        private void ToggleAutostart()
+        {
+            if (Autostart.IsEnabled())
+            {
+                bool ok = Autostart.Disable();
+                ShowBalloon("CyberPaste", ok ? "已關閉開機自動啟動。" : "關閉失敗，請以系統管理員身分再試一次。");
+            }
+            else
+            {
+                bool ok = Autostart.Enable();
+                ShowBalloon("CyberPaste", ok
+                    ? "⚡ 已開啟開機自動啟動，下次開機會自動以系統管理員執行（不跳 UAC）。"
+                    : "開啟失敗，請以系統管理員身分再試一次。");
+            }
         }
 
         private void ToggleEnabled()
