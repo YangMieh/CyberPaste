@@ -62,6 +62,13 @@ namespace CyberPaste
 
 		private readonly object _recentLock = new object();
 
+		// 檔案 announce 的極短重複抑制:只擋「單一次複製卻多次 WM_CLIPBOARDUPDATE」;
+		// 檔案不會被回貼成 FileDropList(接收端只放 .cyberpaste 佔位檔)故無回音風險,
+		// 因此「重新複製同一批檔」要能再次觸發傳輸(一次性貼上的重傳靠這個)。(v1.4.4)
+		private string _lastFileSig;
+
+		private DateTime _lastFileAnnounce = DateTime.MinValue;
+
 		private DateTime _suppressFilesUntil = DateTime.MinValue;
 
 		private VirtualFileDataObject _liveDataObject;
@@ -638,13 +645,18 @@ namespace CyberPaste
 			if (list.Count != 0)
 			{
 				string sig = "F:" + Hash(Encoding.UTF8.GetBytes(string.Join("|", list2.ToArray())));
-				if (!IsRecent(sig))
+				// 只擋 1.5 秒內同一批檔的重複觸發(單次複製的多重 WM_CLIPBOARDUPDATE);
+				// 超過就放行→使用者「重新複製同一批檔」能再次 announce 觸發傳輸。(v1.4.4)
+				DateTime now = DateTime.UtcNow;
+				if (sig == _lastFileSig && (now - _lastFileAnnounce).TotalSeconds < 1.5)
 				{
-					Remember(sig);
-					Guid session = Guid.NewGuid();
-					_net.AnnounceFiles(session, list, list2.ToArray());
-					Log("已 announce " + list.Count + " 個檔案給 " + PeerCount() + " 台（等對方貼上才傳）");
+					return;
 				}
+				_lastFileSig = sig;
+				_lastFileAnnounce = now;
+				Guid session = Guid.NewGuid();
+				_net.AnnounceFiles(session, list, list2.ToArray());
+				Log("已 announce " + list.Count + " 個檔案給 " + PeerCount() + " 台（等對方貼上才傳）");
 			}
 		}
 
