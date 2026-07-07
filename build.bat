@@ -4,7 +4,7 @@ set CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe
 set OUT=%~dp0build\CyberPaste.exe
 
 echo [build] compiling...
-"%CSC%" /nologo /codepage:65001 /target:winexe /optimize+ /out:"%OUT%" /win32manifest:"%~dp0src\app.manifest" /win32icon:"%~dp0src\app.ico" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll "%~dp0src\*.cs"
+"%CSC%" /nologo /codepage:65001 /target:winexe /optimize+ /out:"%OUT%" /win32manifest:"%~dp0src\app.manifest" /win32icon:"%~dp0src\app.ico" /resource:"%~dp0src\app.ico",app.ico /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll "%~dp0src\*.cs"
 
 if errorlevel 1 (
   echo [build] FAILED.

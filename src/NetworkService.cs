@@ -1005,7 +1005,7 @@ namespace CyberPaste
 		// 直接寫進 destFolder;斷線用 v1.3.3 位元組續傳(記已寫入量)+ v1.3.4 路徑失效切換(換候選 IP)。
 		// onActiveWrite:true=正在實際寫檔(呼叫端據此暫停磁碟監看防洗爆);false=沒在寫(斷線重連等待/完成/放棄→
 		// 呼叫端恢復監看,這樣「取消/斷線後」使用者能立刻貼下一個,不必等重連迴圈跑完(v1.4.3 修)。
-		public void ReceiveBulk(IPAddress[] sources, Guid session, List<FileMeta> metas, string destFolder, bool skipExisting, Action<bool> onActiveWrite, Action<BulkProgress> onProgress)
+		public void ReceiveBulk(IPAddress[] sources, Guid session, List<FileMeta> metas, string destFolder, bool skipExisting, Action<bool> onActiveWrite, Func<bool> isCancelled, Action<BulkProgress> onProgress)
 		{
 			IPAddress[] src = ((sources != null && sources.Length > 0) ? sources : new IPAddress[1] { IPAddress.Loopback });
 			long total = 0L;
@@ -1050,6 +1050,12 @@ namespace CyberPaste
 				// 斷在檔中間的續傳點:curIndex>=0 表示正在寫某檔,curGot=該檔已落地量
 				int curIndex = -1;
 				long curGot = 0L;
+				// 被新的一次貼上取代→放棄這條(取消)。(v1.4.4)
+				if (isCancelled != null && isCancelled())
+				{
+					Logger.Log("[NET] 大宗取消(被新的貼上取代)");
+					return;
+				}
 				try
 				{
 					client = ConnectWithTimeout(src[srcIdx], 45889, 3000);
@@ -1139,6 +1145,11 @@ namespace CyberPaste
 							long got = 0L;
 							while (got < remaining)
 							{
+								// 被新的一次貼上取代→丟出以跳出;下方 catch 判斷 isCancelled 直接 return(不重連)。(v1.4.4)
+								if (isCancelled != null && isCancelled())
+								{
+									throw new IOException("__CANCELLED__");
+								}
 								int want = (int)Math.Min(buf.Length, remaining - got);
 								int n = ns.Read(buf, 0, want);
 								if (n <= 0)
@@ -1206,6 +1217,12 @@ namespace CyberPaste
 					}
 					catch
 					{
+					}
+					// 被新的一次貼上取代→直接結束,不重連(避免舊+新兩條同時寫進一個資料夾)。(v1.4.4)
+					if (isCancelled != null && isCancelled())
+					{
+						Logger.Log("[NET] 大宗取消(被新的貼上取代),已完成 " + filesDone + " 檔");
+						return;
 					}
 					// 斷在檔中間→從該檔已落地量續傳;斷在檔與檔之間→resumeIndex 已指向下一檔
 					if (curIndex >= 0)

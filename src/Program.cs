@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
@@ -186,8 +188,60 @@ namespace CyberPaste
             ExitThread();
         }
 
-        // 簡單畫一個「複製」風格圖示（兩張疊起來的紙）。on=啟用(藍) / off=停用(灰)。
+        // 系統匣/工具列圖示:讀內嵌的 app.ico(與 exe 圖示同一張新 copy.png 產生的多尺寸 ico),
+        // 讓系統匣圖示與 exe 圖示一致。(v1.4.4;舊版是用程式碼畫的藍色兩張紙 → 移到 MakeIconDrawn 當後備)
         private static Icon MakeIcon(bool on)
+        {
+            try
+            {
+                Assembly asm = Assembly.GetExecutingAssembly();
+                using (var s = asm.GetManifestResourceStream("app.ico"))
+                {
+                    if (s != null)
+                    {
+                        var full = new Icon(s); // 含多尺寸,系統匣依 DPI 自動挑
+                        if (on) return full;
+                        // 停用態(灰):目前 ShowToggleItem=false 不會顯示,保留灰階以備日後重啟切換
+                        using (var bmp = full.ToBitmap())
+                        using (var gray = ToGrayscale(bmp))
+                        {
+                            IntPtr gh = gray.GetHicon();
+                            var gi = (Icon)Icon.FromHandle(gh).Clone();
+                            full.Dispose();
+                            return gi;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return MakeIconDrawn(on); // 後備:讀不到內嵌 ico 才用舊畫法
+        }
+
+        private static Bitmap ToGrayscale(Bitmap src)
+        {
+            var dst = new Bitmap(src.Width, src.Height);
+            using (var g = Graphics.FromImage(dst))
+            {
+                var cm = new ColorMatrix(new float[][]
+                {
+                    new float[] { 0.3f, 0.3f, 0.3f, 0, 0 },
+                    new float[] { 0.59f, 0.59f, 0.59f, 0, 0 },
+                    new float[] { 0.11f, 0.11f, 0.11f, 0, 0 },
+                    new float[] { 0, 0, 0, 1, 0 },
+                    new float[] { 0, 0, 0, 0, 1 }
+                });
+                using (var ia = new ImageAttributes())
+                {
+                    ia.SetColorMatrix(cm);
+                    g.DrawImage(src, new Rectangle(0, 0, src.Width, src.Height),
+                        0, 0, src.Width, src.Height, GraphicsUnit.Pixel, ia);
+                }
+            }
+            return dst;
+        }
+
+        // 後備:讀不到內嵌 app.ico 時,用程式碼畫一個「複製」風格圖示（兩張疊起來的紙）。on=藍 / off=灰。
+        private static Icon MakeIconDrawn(bool on)
         {
             using (var bmp = new Bitmap(32, 32))
             using (var g = Graphics.FromImage(bmp))

@@ -118,6 +118,14 @@ namespace CyberPaste
 
 		private readonly object _pendingLock = new object();
 
+		// 一次性/取代:同時只有一條大宗。新的一次貼上會取消前一條(可能卡在重連)並關掉它的進度框。
+		// 這兩個欄位只在 UI 緒(HandlePastedPlaceholder)存取,不需鎖。(v1.4.4)
+		private sealed class BulkCancel { public volatile bool Cancelled; }
+
+		private BulkCancel _activeBulkCancel;
+
+		private BulkProgressForm _activeBulkForm;
+
 		public ClipboardService(NetworkService net)
 		{
 			_net = net;
@@ -223,7 +231,9 @@ namespace CyberPaste
 		// UI 緒:讀佔位檔認 session→(衝突則問覆蓋)→對佔位檔所在資料夾跑大宗→完成刪佔位檔+關框。
 		private void HandlePastedPlaceholder(string fullPath)
 		{
-			// 去重+搶佔:HashSet.Add 回 false 表示已有人在處理這個路徑(Watcher 可能重複觸發)
+			// 去重:此保護只覆蓋「讀佔位檔→派工」的短暫 critical section(FileSystemWatcher 可能對
+			// 同一次貼上重複觸發 Created)。派工後(outer finally)立刻釋放路徑,好讓「中斷後重新複製→
+			// 貼回同一個資料夾」能馬上被處理,不必等前一次(卡在重連迴圈)的大宗跑完。(v1.4.4)
 			lock (_activeLock)
 			{
 				if (!_activePaths.Add(fullPath))
@@ -231,7 +241,6 @@ namespace CyberPaste
 					return;
 				}
 			}
-			bool handedOff = false;
 			try
 			{
 				Guid session;
@@ -248,7 +257,7 @@ namespace CyberPaste
 				}
 				if (pend == null || pend.Metas == null || pend.Metas.Count == 0)
 				{
-					return; // 過期/未知 session
+					return; // 一次性貼上:session 已被消費(或從未收到)→不重傳,要再傳請回來源機重新複製
 				}
 				string dest;
 				try
@@ -291,6 +300,13 @@ namespace CyberPaste
 					skipExisting = (r == OverwriteDialog.Result.Skip);
 				}
 
+				// 一次性貼上:大宗即將啟動→消費掉這個 session + 清掉接收端剪貼簿裡我方的佔位項,
+				// 之後用同一份剪貼簿再貼不會重複觸發;要再傳一次請回來源機重新複製。(v1.4.4)
+				lock (_pendingLock)
+				{
+					_pending.Remove(session);
+				}
+				ClearOwnClipboardPlaceholder();
 				IPAddress[] srcIps = pend.SrcIps;
 				List<FileMeta> metas = pend.Metas;
 				long total = pend.Total;
@@ -305,11 +321,25 @@ namespace CyberPaste
 				catch
 				{
 				}
+				// 取代前一條:新的一次貼上取消前一條(可能卡在重連的)大宗並關掉它的進度框,
+				// 避免舊+新兩條同時寫進同一個資料夾。(v1.4.4)
+				BulkCancel myCancel = new BulkCancel();
+				BulkCancel prevCancel = _activeBulkCancel;
+				BulkProgressForm prevForm = _activeBulkForm;
+				_activeBulkCancel = myCancel;
+				_activeBulkForm = form;
+				if (prevCancel != null)
+				{
+					prevCancel.Cancelled = true;
+				}
+				if (prevForm != null && prevForm != form)
+				{
+					try { prevForm.BeginInvoke((Action)delegate { try { prevForm.Close(); } catch { } }); } catch { }
+				}
 				BulkProgressForm formRef = form;
 				bool skipCopy = skipExisting;
 				string destCopy = dest;
 				Guid sessionCopy = session;
-				handedOff = true;
 				ThreadPool.QueueUserWorkItem(delegate
 				{
 					try
@@ -336,6 +366,10 @@ namespace CyberPaste
 								catch
 								{
 								}
+							},
+							delegate
+							{
+								return myCancel.Cancelled;
 							},
 							delegate(NetworkService.BulkProgress p)
 							{
@@ -384,21 +418,16 @@ namespace CyberPaste
 						catch
 						{
 						}
-						lock (_activeLock)
-						{
-							_activePaths.Remove(fullPath);
-						}
 					}
 				});
 			}
 			finally
 			{
-				if (!handedOff)
+				// 派工後(或任何提前 return)立刻釋放路徑,讓下一次貼上能馬上被處理,
+				// 不必等前一次(可能卡在重連)的大宗跑完。(v1.4.4)
+				lock (_activeLock)
 				{
-					lock (_activeLock)
-					{
-						_activePaths.Remove(fullPath);
-					}
+					_activePaths.Remove(fullPath);
 				}
 			}
 		}
@@ -444,6 +473,39 @@ namespace CyberPaste
 				{
 					File.SetAttributes(path, FileAttributes.Normal);
 					File.Delete(path);
+				}
+			}
+			catch
+			{
+			}
+		}
+
+		// 一次性貼上:清掉接收端剪貼簿裡我方放的佔位項(僅在剪貼簿目前確實是我方佔位檔時才清,
+		// 避免蓋掉使用者後來自己複製的東西)。清空後 OnClipboardUpdated 讀到空剪貼簿→無動作。(v1.4.4)
+		private void ClearOwnClipboardPlaceholder()
+		{
+			try
+			{
+				if (!Clipboard.ContainsFileDropList())
+				{
+					return;
+				}
+				StringCollection list = Clipboard.GetFileDropList();
+				bool mine = false;
+				foreach (string p in list)
+				{
+					if (p != null && p.EndsWith(PlaceholderExt, StringComparison.OrdinalIgnoreCase))
+					{
+						mine = true;
+						break;
+					}
+				}
+				if (mine)
+				{
+					RetryClipboard(delegate
+					{
+						Clipboard.Clear();
+					});
 				}
 			}
 			catch
