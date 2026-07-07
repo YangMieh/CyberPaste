@@ -79,7 +79,8 @@ UDP 45888 用於探索，TCP 45889 用於傳輸。為可信任的內網設計，
 - **v1.4.2** — High-speed bulk file transfer. Files now stream over one dedicated connection into the folder you paste to, with CyberPaste's own progress window and an overwrite prompt — no Explorer conflict dialogs. Paste with Ctrl+V, right-click Paste, or the toolbar Paste button (a tiny hidden marker file is detected by a drive watcher that survives repeated multi-GB transfers). Measured ~0.9–1.1 Gbps over a VM NAT link.
 - **v1.4.3** — The drive watcher resumes the moment a transfer drops into its reconnect loop, so you can paste the next item without reopening.
 - **v1.4.4** — One-shot paste (a copy transfers once; copy again to send again), a new paste supersedes a stuck transfer, and the tray icon now matches the app icon.
-- **v1.4.5** — Closing the progress window now cancels that transfer, so you can immediately paste the next item. (current release)
+- **v1.4.5** — Closing the progress window now cancels that transfer, so you can immediately paste the next item.
+- **v1.4.6** — Added a "start on boot" toggle in the tray menu (starts elevated at logon via a Task Scheduler task, no UAC prompt), plus a first-run desktop shortcut pointing to the current exe — and if that shortcut was hidden, it stays hidden. (current release)
 
 <!-- -->
 
@@ -98,7 +99,8 @@ UDP 45888 用於探索，TCP 45889 用於傳輸。為可信任的內網設計，
 - **v1.4.2** — 高速大宗檔案傳輸。檔案改用一條專用連線串流進你貼上的那個資料夾，附 CyberPaste 自己的進度視窗與覆蓋詢問——不再跳 Explorer 衝突框。可用 Ctrl+V、右鍵貼上、或工具列的貼上按鈕（放一個隱藏小標記檔，由磁碟監看偵測，且能撐過連續多 GB 傳輸）。VM NAT 連線實測約 0.9～1.1 Gbps。
 - **v1.4.3** — 傳輸一進入重連等待就恢復磁碟監看，讓你不必重開就能貼下一個。
 - **v1.4.4** — 一次性貼上（複製一次＝傳一次，要再傳就重新複製）、新的貼上會取代卡住的傳輸、系統匣圖示改為與 App 圖示一致。
-- **v1.4.5** — 關閉進度視窗即取消該次傳輸，可立刻貼下一個。（目前版本）
+- **v1.4.5** — 關閉進度視窗即取消該次傳輸，可立刻貼下一個。
+- **v1.4.6** — 系統匣選單新增「開機時自動啟動」（工作排程器登入觸發、以系統管理員啟動不跳 UAC），並在首次執行於桌面建立指向目前 exe 的捷徑；若該捷徑原本是隱藏的，會維持隱藏。（目前版本）
 
 ## Verified publisher / 已驗證發行者
 
