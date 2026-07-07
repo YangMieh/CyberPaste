@@ -76,7 +76,10 @@ UDP 45888 用於探索，TCP 45889 用於傳輸。為可信任的內網設計，
 - **v1.3.9** — Files put only a private marker on the clipboard (no OLE file descriptor), removing Explorer paste conflicts.
 - **v1.4.0** — Bulk transfer via a hidden marker file detected by a drive watcher, so Ctrl+V, right-click Paste and the toolbar Paste button all work; added the overwrite prompt.
 - **v1.4.1** — The marker file is removed the moment you paste, and the progress window closes with a quick flash.
-- **v1.4.2** — High-speed bulk file transfer. Files now stream over one dedicated connection into the folder you paste to, with CyberPaste's own progress window and an overwrite prompt — no Explorer conflict dialogs. Paste with Ctrl+V, right-click Paste, or the toolbar Paste button (a tiny hidden marker file is detected by a drive watcher that survives repeated multi-GB transfers). Measured ~0.9–1.1 Gbps over a VM NAT link. (current release)
+- **v1.4.2** — High-speed bulk file transfer. Files now stream over one dedicated connection into the folder you paste to, with CyberPaste's own progress window and an overwrite prompt — no Explorer conflict dialogs. Paste with Ctrl+V, right-click Paste, or the toolbar Paste button (a tiny hidden marker file is detected by a drive watcher that survives repeated multi-GB transfers). Measured ~0.9–1.1 Gbps over a VM NAT link.
+- **v1.4.3** — The drive watcher resumes the moment a transfer drops into its reconnect loop, so you can paste the next item without reopening.
+- **v1.4.4** — One-shot paste (a copy transfers once; copy again to send again), a new paste supersedes a stuck transfer, and the tray icon now matches the app icon.
+- **v1.4.5** — Closing the progress window now cancels that transfer, so you can immediately paste the next item. (current release)
 
 <!-- -->
 
@@ -92,7 +95,10 @@ UDP 45888 用於探索，TCP 45889 用於傳輸。為可信任的內網設計，
 - **v1.3.9** — 檔案在剪貼簿只放私有標記（不放 OLE 檔案描述子），消除 Explorer 貼上衝突。
 - **v1.4.0** — 大宗改用隱藏標記檔＋磁碟監看偵測，Ctrl+V、右鍵貼上、工具列貼上都能用；加入覆蓋詢問。
 - **v1.4.1** — 一貼上就移除標記檔、進度視窗快閃即關。
-- **v1.4.2** — 高速大宗檔案傳輸。檔案改用一條專用連線串流進你貼上的那個資料夾，附 CyberPaste 自己的進度視窗與覆蓋詢問——不再跳 Explorer 衝突框。可用 Ctrl+V、右鍵貼上、或工具列的貼上按鈕（放一個隱藏小標記檔，由磁碟監看偵測，且能撐過連續多 GB 傳輸）。VM NAT 連線實測約 0.9～1.1 Gbps。（目前版本）
+- **v1.4.2** — 高速大宗檔案傳輸。檔案改用一條專用連線串流進你貼上的那個資料夾，附 CyberPaste 自己的進度視窗與覆蓋詢問——不再跳 Explorer 衝突框。可用 Ctrl+V、右鍵貼上、或工具列的貼上按鈕（放一個隱藏小標記檔，由磁碟監看偵測，且能撐過連續多 GB 傳輸）。VM NAT 連線實測約 0.9～1.1 Gbps。
+- **v1.4.3** — 傳輸一進入重連等待就恢復磁碟監看，讓你不必重開就能貼下一個。
+- **v1.4.4** — 一次性貼上（複製一次＝傳一次，要再傳就重新複製）、新的貼上會取代卡住的傳輸、系統匣圖示改為與 App 圖示一致。
+- **v1.4.5** — 關閉進度視窗即取消該次傳輸，可立刻貼下一個。（目前版本）
 
 ## Verified publisher / 已驗證發行者
 
