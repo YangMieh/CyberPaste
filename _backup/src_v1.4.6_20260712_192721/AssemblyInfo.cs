@@ -7,5 +7,5 @@ using System.Reflection;
 [assembly: AssemblyCompany("小咩 / YangMieh")]       // → CompanyName
 [assembly: AssemblyCopyright("(C) 小咩 / YangMieh")]  // → LegalCopyright
 [assembly: AssemblyDescription("同一區網內的無損共享剪貼簿 / Lossless shared clipboard for your LAN")]
-[assembly: AssemblyVersion("1.4.7.0")]
-[assembly: AssemblyFileVersion("1.4.7.0")]
+[assembly: AssemblyVersion("1.4.6.0")]
+[assembly: AssemblyFileVersion("1.4.6.0")]

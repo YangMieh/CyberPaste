@@ -58,13 +58,7 @@ namespace CyberPaste
 
 		private readonly ListenerWindow _window;
 
-		// 回音防護:擋掉「遠端送來→我方寫回剪貼簿→又被自己推播回去」的乒乓。回音必定發生在毫秒內,
-		// 故只在 EchoWindowSeconds 內有效——否則「複製一模一樣的內容第二次」會被永久當成回音吞掉,
-		// 使用者以為工具壞了(v1.4.7 修:原本 sig 只進不出,24 筆內同內容永遠不再推播)。
-		private const double EchoWindowSeconds = 5.0;
-
-		private readonly LinkedList<KeyValuePair<string, DateTime>> _recent =
-			new LinkedList<KeyValuePair<string, DateTime>>();
+		private readonly LinkedList<string> _recent = new LinkedList<string>();
 
 		private readonly object _recentLock = new object();
 
@@ -798,7 +792,7 @@ namespace CyberPaste
 		{
 			lock (_recentLock)
 			{
-				_recent.AddFirst(new KeyValuePair<string, DateTime>(sig, DateTime.UtcNow));
+				_recent.AddFirst(sig);
 				while (_recent.Count > 24)
 				{
 					_recent.RemoveLast();
@@ -808,17 +802,9 @@ namespace CyberPaste
 
 		private bool IsRecent(string sig)
 		{
-			DateTime now = DateTime.UtcNow;
 			lock (_recentLock)
 			{
-				foreach (KeyValuePair<string, DateTime> e in _recent)
-				{
-					if (e.Key == sig && (now - e.Value).TotalSeconds < EchoWindowSeconds)
-					{
-						return true;
-					}
-				}
-				return false;
+				return _recent.Contains(sig);
 			}
 		}
 

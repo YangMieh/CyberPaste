@@ -310,18 +310,7 @@ namespace CyberPaste
 
 		private readonly string _myName = Environment.MachineName;
 
-		// 本機 IP 一律「即時列舉網卡」判斷,不可用啟動時的快照:程式(尤其開機自動啟動)常在網卡拿到 IP 前
-		// 就起來,之後新上線的網卡(APIPA/VMware/Hamachi/DHCP 換位址)不在快照裡 → 自己廣播繞回自己時
-		// 會被當成一台新夥伴收下(self-peer)→ 自己 announce 自己收、剪貼簿被自己換成佔位檔。(v1.4.7)
-		private volatile HashSet<string> _localIps;
-
-		private DateTime _localIpsAt = DateTime.MinValue;
-
-		private readonly object _localIpsLock = new object();
-
-		// 自我識別用:每次啟動產生,beacon 一併送出。收到帶有自己 ID 的 beacon 即為自己的回音,
-		// 直接忽略——完全不依賴 IP 判斷,任何網路變動都不會自我配對。(v1.4.7)
-		private readonly string _instanceId = Guid.NewGuid().ToString("N").Substring(0, 8);
+		private readonly HashSet<string> _localIps;
 
 		private readonly ConcurrentDictionary<string, Peer> _peers = new ConcurrentDictionary<string, Peer>();
 
@@ -351,52 +340,10 @@ namespace CyberPaste
 
 		public NetworkService()
 		{
-			RefreshLocalIps();
-		}
-
-		// 列舉所有 up 的網卡的 IPv4(含虛擬網卡/APIPA)。Dns.GetHostAddresses 會漏,不可用。
-		private HashSet<string> RefreshLocalIps()
-		{
-			HashSet<string> set = new HashSet<string>();
-			set.Add("127.0.0.1");
-			try
-			{
-				NetworkInterface[] nics = NetworkInterface.GetAllNetworkInterfaces();
-				foreach (NetworkInterface ni in nics)
-				{
-					if (ni.OperationalStatus != OperationalStatus.Up)
-					{
-						continue;
-					}
-					foreach (UnicastIPAddressInformation ua in ni.GetIPProperties().UnicastAddresses)
-					{
-						if (ua.Address.AddressFamily == AddressFamily.InterNetwork)
-						{
-							set.Add(ua.Address.ToString());
-						}
-					}
-				}
-			}
-			catch
-			{
-			}
-			lock (_localIpsLock)
-			{
-				_localIps = set;
-				_localIpsAt = DateTime.UtcNow;
-			}
-			return set;
-		}
-
-		// 這個 IP 是不是本機的?(網卡清單最多快取 5 秒,網路一變動就會被重新列舉)
-		private bool IsLocalIp(string ip)
-		{
-			HashSet<string> set = _localIps;
-			if (set == null || (DateTime.UtcNow - _localIpsAt).TotalSeconds > 5.0)
-			{
-				set = RefreshLocalIps();
-			}
-			return set.Contains(ip);
+			_localIps = new HashSet<string>(from a in Dns.GetHostAddresses(Dns.GetHostName())
+				where a.AddressFamily == AddressFamily.InterNetwork
+				select a.ToString());
+			_localIps.Add("127.0.0.1");
 		}
 
 		public void Start()
@@ -427,7 +374,7 @@ namespace CyberPaste
 		{
 			try
 			{
-				byte[] bytes = Encoding.UTF8.GetBytes("CYBERPASTE|" + _myName + "|" + _instanceId);
+				byte[] bytes = Encoding.UTF8.GetBytes("CYBERPASTE|" + _myName);
 				foreach (IPEndPoint item in BeaconTargets())
 				{
 					try
@@ -438,7 +385,7 @@ namespace CyberPaste
 					{
 					}
 				}
-				byte[] bytes2 = Encoding.UTF8.GetBytes("CYBERREPLY|" + _myName + "|" + _instanceId);
+				byte[] bytes2 = Encoding.UTF8.GetBytes("CYBERREPLY|" + _myName);
 				Peer[] array = _peers.Values.ToArray();
 				foreach (Peer peer in array)
 				{
@@ -573,7 +520,7 @@ namespace CyberPaste
 				if (candidate != null)
 				{
 					string item = candidate.ToString();
-					if (!IsLocalIp(item) && hashSet.Add(item))
+					if (!_localIps.Contains(item) && hashSet.Add(item))
 					{
 						list.Add(candidate);
 					}
@@ -674,38 +621,21 @@ namespace CyberPaste
 				{
 					text2 = text.Substring("CYBERREPLY|".Length);
 				}
-				if (text2 == null)
-				{
-					return;
-				}
-				// 自我識別(v1.4.7):payload = 機器名[|實例ID]。收到自己的實例 ID = 自己的廣播繞回自己,忽略。
-				// 沒帶 ID 的(舊版)退回 IP 判斷。IP 判斷本身也已改為即時列舉網卡,不再是啟動快照。
-				string peerName = text2;
-				int bar = text2.IndexOf('|');
-				if (bar >= 0)
-				{
-					string peerInstance = text2.Substring(bar + 1);
-					peerName = text2.Substring(0, bar);
-					if (peerInstance == _instanceId)
-					{
-						return;
-					}
-				}
-				if (IsLocalIp(remoteEP.Address.ToString()))
+				if (text2 == null || _localIps.Contains(remoteEP.Address.ToString()))
 				{
 					return;
 				}
 				_peers[remoteEP.Address.ToString()] = new Peer
 				{
 					Ip = remoteEP.Address,
-					Name = peerName,
+					Name = text2,
 					LastSeen = DateTime.UtcNow
 				};
 				if (flag)
 				{
 					try
 					{
-						byte[] bytes2 = Encoding.UTF8.GetBytes("CYBERREPLY|" + _myName + "|" + _instanceId);
+						byte[] bytes2 = Encoding.UTF8.GetBytes("CYBERREPLY|" + _myName);
 						_udp.Send(bytes2, bytes2.Length, remoteEP);
 						return;
 					}
@@ -795,20 +725,6 @@ namespace CyberPaste
 			client.SendBufferSize = 1048576;
 			client.ReceiveBufferSize = 1048576;
 			NetworkStream stream = client.GetStream();
-			// 防呆(v1.4.7):來自本機 IP 的文字/圖片/announce 一律不套用——正常情況不該存在「自己連自己」,
-			// 萬一探索層再出漏洞,也絕不會把自己的剪貼簿內容當成遠端的套回來(仍讀完 blob 保持串流同步)。
-			bool fromSelf = false;
-			try
-			{
-				fromSelf = IsLocalIp(((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString());
-			}
-			catch
-			{
-			}
-			if (fromSelf)
-			{
-				Log("忽略來自本機的連線(self-loop)");
-			}
 			while (_running)
 			{
 				int num;
@@ -833,7 +749,7 @@ namespace CyberPaste
 				case 1:
 				{
 					byte[] bytes2 = ReadBlob(stream);
-					if (OnText != null && !fromSelf)
+					if (OnText != null)
 					{
 						OnText(Encoding.UTF8.GetString(bytes2));
 					}
@@ -842,7 +758,7 @@ namespace CyberPaste
 				case 2:
 				{
 					byte[] obj2 = ReadBlob(stream);
-					if (OnImagePng != null && !fromSelf)
+					if (OnImagePng != null)
 					{
 						OnImagePng(obj2);
 					}
@@ -879,7 +795,7 @@ namespace CyberPaste
 					{
 						Log("收到 announce,來源候選路徑優先序: " + string.Join(", ", Array.ConvertAll(array, (IPAddress a) => a.ToString())));
 					}
-					if (OnFilesAnnounce != null && !fromSelf && array.Length > 0)
+					if (OnFilesAnnounce != null)
 					{
 						OnFilesAnnounce(array, arg, list2);
 					}
