@@ -5,3 +5,4 @@ _signing/
 srvt.exe
 _diag/
 _backup/
+*.bak
